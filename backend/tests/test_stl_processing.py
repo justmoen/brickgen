@@ -55,6 +55,44 @@ class TestSTLConverterRotationSuffix:
         assert "90" in s2 and "45" in s2 and "30" in s2
 
 
+class TestSTLConverterWithoutOrientation:
+    def test_requested_rotation_is_ignored_and_unrotated_cache_is_used(
+        self, tmp_path, monkeypatch
+    ):
+        conv = STLConverter()
+        conv.cache_dir = tmp_path
+        repair_calls = []
+
+        class FakeLDViewConverter:
+            def convert_to_stl(self, ldraw_id, stl_path, scale_factor):
+                stl_path.write_text("unrotated mesh")
+                return True
+
+        class FakeOrienter:
+            def apply_absolute_rotation(self, *args):
+                pytest.fail("Orientation should be disabled for this test")
+
+        conv.converter = FakeLDViewConverter()
+        conv.orienter = FakeOrienter()
+        monkeypatch.setattr(
+            "backend.core.stl_processing.repair_single_file_inplace",
+            lambda path: repair_calls.append(path),
+        )
+
+        result = conv.get_or_convert_stl(
+            "3001",
+            scale_factor=10,
+            rotation_enabled=True,
+            rotation_x=-90,
+        )
+
+        assert result.parent == tmp_path
+        assert result.name.startswith("3001_scale10_q")
+        assert "rotation" not in result.name
+        assert result.read_text() == "unrotated mesh"
+        assert repair_calls == [result]
+
+
 class TestSTLConverterCacheStats:
     def test_empty_cache(self):
         conv = STLConverter()

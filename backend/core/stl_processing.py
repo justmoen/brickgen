@@ -70,6 +70,12 @@ class STLConverter:
             logger.warning("No LDraw ID provided")
             return None
 
+        # TEMP: disable orientation for a comparison run, including cache selection.
+        rotation_enabled = False
+        rotation_x = 0.0
+        rotation_y = 0.0
+        rotation_z = 0.0
+
         quality_key = get_ldview_quality_key()
         stem = _cache_filename(
             ldraw_id, scale_factor, rotation_enabled, rotation_x, rotation_y, rotation_z, quality_key
@@ -102,8 +108,7 @@ class STLConverter:
             logger.debug(f"Using cached STL for {ldraw_id} (filesystem)")
             return stl_path
 
-        # --- 2. GENERATE VIA LDVIEW AND APPLY ORIENTATION ---
-        rot_detail = f", rotation=({rotation_x}, {rotation_y}, {rotation_z})" if rotation_enabled else ""
+        # --- 2. GENERATE VIA LDVIEW ---
         logger.info(f"Converting {ldraw_id} with LDView (scale={scale_factor})...")
         
         if not self.converter.convert_to_stl(ldraw_id, stl_path, scale_factor=scale_factor):
@@ -125,11 +130,6 @@ class STLConverter:
         # ==========================================================
         # INJECT PRE-CACHE INTERCEPT END
         # ==========================================================
-
-        if rotation_enabled and (rotation_x != 0 or rotation_y != 0 or rotation_z != 0):
-            logger.info(f"Applying rotation for {ldraw_id}...")
-            if not self.orienter.apply_absolute_rotation(stl_path, rotation_x, rotation_y, rotation_z):
-                logger.warning(f"Rotation failed for {ldraw_id}, using unconverted orientation")
 
         # --- 3. SAVE THE CLEAN DATA TRACK TO THE DATABASE ---
         if db is not None:
