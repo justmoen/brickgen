@@ -1,25 +1,32 @@
-"""3MF file generation with bin packing for 3D printing.
-
-Note on Bambu Studio: When opening a 3MF not created by Bambu Lab, Bambu Studio shows
-"load geometry data and color data only". It uses the 3MF Production Extension by default;
-for other 3MF files it may ignore build-item transforms (placement) and only import
-meshes, then apply its own arrangement. So pre-placed parts may still appear stacked in
-the center in Bambu; other slicers (e.g. PrusaSlicer, Cura) that fully support 3MF Core
-should respect our placement. We output standard 3MF Core with matrix transforms and
-optional Materials Extension colors for maximum compatibility.
-"""
+"""3MF file generation with bin packing for 3D printing."""
+import json
 import logging
 import os
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
-import re
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
 # 3MF Materials Extension namespace for color
-NS_M = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+NS_P = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+NS_BAMBU = "http://schemas.bambulab.com/package/2021"
+NS_CORE = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+NS_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+
+PRINTER_MODEL = "Bambu Lab A1"
+PRINTER_PRESET = "Bambu Lab A1 0.4 nozzle"
+PROCESS_PRESET = "0.20mm PETG LEGO"
+FILAMENT_PRESET = "Generic PETG @BBL A1 - LEGO"
+BAMBU_VERSION = "02.08.02.61"
+BAMBU_SETTINGS_TEMPLATE = Path(__file__).with_name("bambu_a1_petg_project_settings.json")
+
+ET.register_namespace("", NS_CORE)
+ET.register_namespace("p", NS_P)
+ET.register_namespace("BambuStudio", NS_BAMBU)
 
 
 class ThreeMFGenerator:
@@ -57,6 +64,7 @@ class ThreeMFGenerator:
         try:
             part_meshes = []
             for t in parts:
+                # FIX: Ensure index access, [1], [2] is declared properly
                 stl_path, ldraw_id, quantity = t[0], t[1], t[2]
                 color_rgb = (t[3].strip().lstrip("#") or None) if len(t) > 3 and t[3] else None
                 if color_rgb and len(color_rgb) != 6:
@@ -93,6 +101,7 @@ class ThreeMFGenerator:
         try:
             vertices = []
             triangles = []
+            vertex_indices = {}
             current_vertices = []
             
             with open(stl_path, 'r') as f:
@@ -103,8 +112,13 @@ class ThreeMFGenerator:
                         parts = line.split()
                         if len(parts) >= 4:
                             vertex = [float(parts[1]), float(parts[2]), float(parts[3])]
-                            vertices.append(vertex)
-                            current_vertices.append(len(vertices) - 1)
+                            vertex_key = tuple(vertex)
+                            vertex_index = vertex_indices.get(vertex_key)
+                            if vertex_index is None:
+                                vertex_index = len(vertices)
+                                vertices.append(vertex)
+                                vertex_indices[vertex_key] = vertex_index
+                            current_vertices.append(vertex_index)
                     
                     elif line.startswith('endfacet'):
                         if len(current_vertices) == 3:
@@ -176,16 +190,17 @@ class ThreeMFGenerator:
                     'instance_num': i + 1,
                     'color_rgb': part.get('color_rgb'),
                 })
-        
+
         instances.sort(key=lambda x: x['bbox']['size'][0] * x['bbox']['size'][1], reverse=True)
         
         plate_gap = 10  # mm between logical plates
         plate_offset_y = 0.0
         shelves = []
         current_y = 0.0
-        
+
         for instance in instances:
             bbox = instance['bbox']
+            # FIX: Bind the coordinate elements properly
             width = bbox['size'][0]
             depth = bbox['size'][1]
             height = bbox['size'][2]
@@ -196,7 +211,8 @@ class ThreeMFGenerator:
             for shelf in shelves:
                 if shelf['width_remaining'] >= width_with_spacing and current_y + depth_with_spacing <= plate_depth:
                     x_pos = shelf['x']
-                    y_pos = shelf['y'] + plate_offset_y
+                    y_pos = shelf['y']
+                    # FIX: Append coordinate arrays, [1], [2]
                     translation = [
                         x_pos + width / 2 - bbox['center'][0],
                         y_pos + depth / 2 - bbox['center'][1],
@@ -205,6 +221,7 @@ class ThreeMFGenerator:
                     placements.append({
                         'mesh_data': instance['mesh_data'],
                         'translation': translation,
+                        'plate_index': int(plate_offset_y / (plate_depth + plate_gap)),
                         'ldraw_id': instance['ldraw_id'],
                         'instance_num': instance['instance_num'],
                         'color_rgb': instance.get('color_rgb'),
@@ -223,7 +240,7 @@ class ThreeMFGenerator:
                     shelves = []
                 
                 x_pos = 0
-                y_pos = current_y + plate_offset_y
+                y_pos = current_y
                 translation = [
                     x_pos + width / 2 - bbox['center'][0],
                     y_pos + depth / 2 - bbox['center'][1],
@@ -232,6 +249,7 @@ class ThreeMFGenerator:
                 placements.append({
                     'mesh_data': instance['mesh_data'],
                     'translation': translation,
+                    'plate_index': int(plate_offset_y / (plate_depth + plate_gap)),
                     'ldraw_id': instance['ldraw_id'],
                     'instance_num': instance['instance_num'],
                     'color_rgb': instance.get('color_rgb'),
@@ -248,7 +266,11 @@ class ThreeMFGenerator:
         logger.info(f"Packed {len(placements)} parts onto {num_plates} build plate(s)")
         return placements
     
-    def _create_3mf_file(self, placements: List[Dict], output_path: Path) -> bool:
+    def _create_3mf_file(
+        self,
+        placements: List[Dict],
+        output_path: Path
+    ) -> bool:
         """Create 3MF ZIP file with proper structure.
         
         Args:
@@ -261,34 +283,27 @@ class ThreeMFGenerator:
         try:
             # Create temporary directory for 3MF structure
             import tempfile
-            import shutil
             
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmppath = Path(tmpdir)
-                
-                # Create 3MF directory structure
-                (tmppath / "3D").mkdir()
+
+                (tmppath / "3D" / "Objects").mkdir(parents=True)
+                (tmppath / "3D" / "_rels").mkdir()
                 (tmppath / "_rels").mkdir()
-                
-                # Create [Content_Types].xml
+                (tmppath / "Metadata").mkdir()
+
                 self._create_content_types(tmppath)
-                
-                # Create _rels/.rels
                 self._create_rels(tmppath)
-                
-                # Create 3D/3dmodel.model (main model file)
                 self._create_model_file(tmppath, placements)
-                
-                # Create 3MF ZIP file
+                self._create_project_settings(tmppath, placements)
+                self._create_slice_info(tmppath)
+
                 with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    for root, _dirs, files in os.walk(tmppath):
+                    for root, _, files in os.walk(tmppath):
                         root_path = Path(root)
                         for file in files:
                             file_path = root_path / file
-                            arcname = file_path.relative_to(tmppath)
-                            zf.write(file_path, arcname)
-                
-                logger.info(f"Created 3MF file: {output_path}")
+                            zf.write(file_path, file_path.relative_to(tmppath))
                 return True
                 
         except Exception as e:
@@ -310,74 +325,319 @@ class ThreeMFGenerator:
         root = ET.Element("Relationships", xmlns="http://schemas.openxmlformats.org/package/2006/relationships")
         ET.SubElement(root, "Relationship",
                      Target="/3D/3dmodel.model",
-                     Id="rel0",
+                     Id="rel-1",
                      Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel")
         
         tree = ET.ElementTree(root)
         ET.indent(tree, space="  ")
         tree.write(base_path / "_rels" / ".rels", encoding="utf-8", xml_declaration=True)
-    
+
+    def _create_project_settings(self, base_path: Path, placements: List[Dict]):
+        """Add the validated A1 PETG project settings used by Bambu Studio."""
+        with BAMBU_SETTINGS_TEMPLATE.open(encoding="utf-8") as settings_file:
+            settings = json.load(settings_file)
+
+        colors = []
+        for placement in placements:
+            color = (placement.get("color_rgb") or "808080").strip().upper()
+            if len(color) != 6 or any(char not in "0123456789ABCDEF" for char in color):
+                color = "808080"
+            if color not in colors:
+                colors.append(color)
+        if len(colors) > 4:
+            raise ValueError(
+                "Bambu Lab A1 project export supports at most four distinct part colors"
+            )
+
+        colors.extend([colors[0] if colors else "808080"] * (4 - len(colors)))
+        settings.update({
+            "printer_model": PRINTER_MODEL,
+            "printer_settings_id": PRINTER_PRESET,
+            "printer_variant": "0.4",
+            "nozzle_diameter": ["0.4"],
+            "print_settings_id": PROCESS_PRESET,
+            "default_print_profile": "0.20mm Standard @BBL A1",
+            "default_filament_profile": [FILAMENT_PRESET],
+            "filament_settings_id": [FILAMENT_PRESET] * 4,
+            "filament_type": ["PETG"] * 4,
+            "filament_vendor": ["Generic"] * 4,
+            "filament_extruder_variant": ["Direct Drive Standard"] * 4,
+            "filament_flow_ratio": ["0.96"] * 4,
+            "nozzle_temperature_range_low": ["240"] * 4,
+            "nozzle_temperature_range_high": ["250"] * 4,
+            "filament_colour": [f"#{color}" for color in colors],
+        })
+
+        config_dir = base_path / "Metadata"
+        config_dir.mkdir(exist_ok=True)
+        (config_dir / "project_settings.config").write_text(
+            json.dumps(settings, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    def _create_slice_info(self, base_path: Path):
+        config = ET.Element("config")
+        header = ET.SubElement(config, "header")
+        ET.SubElement(
+            header, "header_item", key="X-BBL-Client-Type", value="slicer"
+        )
+        ET.SubElement(
+            header, "header_item", key="X-BBL-Client-Version", value=BAMBU_VERSION
+        )
+        ET.indent(config, space="  ")
+        ET.ElementTree(config).write(
+            base_path / "Metadata" / "slice_info.config",
+            encoding="UTF-8",
+            xml_declaration=True,
+        )
+
     def _create_model_file(self, base_path: Path, placements: List[Dict]):
-        """Create 3D/3dmodel.model file with meshes, optional colors, and build items.
-        Uses 3MF Core transform matrix (column-major 3x4) for placement compatibility.
-        """
-        model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
-        root = ET.Element("model", unit="millimeter", xmlns=model_ns)
-        root.set("xmlns:m", NS_M)
+        """Write Bambu's Production Extension model and its linked mesh resources."""
+        root = ET.Element("model", {
+            "unit": "millimeter",
+            "xml:lang": "en-US",
+            "xmlns": NS_CORE,
+            "xmlns:BambuStudio": NS_BAMBU,
+            "xmlns:p": NS_P,
+            "requiredextensions": "p",
+        })
+        self._add_metadata(root, "Application", f"BambuStudio-{BAMBU_VERSION}")
+        self._add_metadata(root, "BambuStudio:3mfVersion", "1")
+        self._add_metadata(root, "CreationDate", date.today().isoformat())
+
         resources = ET.SubElement(root, "resources")
-        build = ET.SubElement(root, "build")
-        
-        # Collect unique colors and build colorgroup (Materials Extension)
+        build = ET.SubElement(root, "build", {"p:UUID": str(uuid4())})
+        relationships = ET.Element(
+            "Relationships",
+            xmlns=NS_REL,
+        )
+        model_settings = ET.Element("config")
+        plate_indices = sorted({
+            max(0, int(placement.get("plate_index", 0)))
+            for placement in placements
+        })
+        plates = {}
+        for plate_index in plate_indices:
+            plate = ET.SubElement(model_settings, "plate")
+            plates[plate_index] = plate
+            for key, value in (
+                ("plater_id", str(plate_index + 1)),
+                ("plater_name", f"Plate {plate_index + 1}"),
+                ("locked", "false"),
+                ("filament_map_mode", "Auto For Flush"),
+                ("filament_maps", "1 1 1 1"),
+                ("filament_volume_maps", "0 0 0 0"),
+            ):
+                ET.SubElement(plate, "metadata", key=key, value=value)
+
+        identity_transform = "1 0 0 0 1 0 0 0 1 0 0 0"
         unique_colors = []
-        color_to_index = {}
-        default_hex = "808080"
-        for p in placements:
-            rgb = (p.get("color_rgb") or "").strip().upper()
-            if len(rgb) == 6 and all(c in "0123456789ABCDEF" for c in rgb):
-                if rgb not in color_to_index:
-                    color_to_index[rgb] = len(unique_colors)
-                    unique_colors.append(rgb)
-            else:
-                if default_hex not in color_to_index:
-                    color_to_index[default_hex] = len(unique_colors)
-                    unique_colors.append(default_hex)
-        
-        # Resource IDs must be unique. Use id=1 for colorgroup, 2+ for objects.
-        next_object_id = 2 if unique_colors else 1
-        if unique_colors:
-            cg = ET.SubElement(resources, f"{{{NS_M}}}colorgroup", id="1")
-            for hex_rgb in unique_colors:
-                ET.SubElement(cg, f"{{{NS_M}}}color", color=f"#{hex_rgb}")
-        
+        for candidate in placements:
+            candidate_color = (candidate.get("color_rgb") or "808080").strip().upper()
+            if len(candidate_color) != 6 or any(
+                char not in "0123456789ABCDEF" for char in candidate_color
+            ):
+                candidate_color = "808080"
+            if candidate_color not in unique_colors:
+                unique_colors.append(candidate_color)
+
         for idx, placement in enumerate(placements):
-            object_id = next_object_id + idx
+            object_id = 2 + idx * 2
+            mesh_object_id = object_id - 1
             mesh_data = placement['mesh_data']
-            translation = placement['translation']
-            rgb = (placement.get("color_rgb") or "").strip().upper()
-            if len(rgb) != 6 or not all(c in "0123456789ABCDEF" for c in rgb):
-                rgb = default_hex
-            color_index = color_to_index.get(rgb, 0)
-            
-            obj_attrib = {"id": str(object_id), "type": "model"}
-            if unique_colors:
-                obj_attrib["pid"] = "1"
-                obj_attrib["pindex"] = str(color_index)
-            obj = ET.SubElement(resources, "object", **obj_attrib)
-            mesh = ET.SubElement(obj, "mesh")
-            vertices_elem = ET.SubElement(mesh, "vertices")
-            triangles_elem = ET.SubElement(mesh, "triangles")
-            for vertex in mesh_data['vertices']:
-                ET.SubElement(vertices_elem, "vertex",
-                    x=f"{vertex[0]:.6f}", y=f"{vertex[1]:.6f}", z=f"{vertex[2]:.6f}")
-            for triangle in mesh_data['triangles']:
-                ET.SubElement(triangles_elem, "triangle",
-                    v1=str(triangle[0]), v2=str(triangle[1]), v3=str(triangle[2]))
-            
-            # 3MF transform: 3x4 matrix column-major (m00 m10 m20 m01 m11 m21 m02 m12 m22 m03 m13 m23)
-            tx, ty, tz = translation[0], translation[1], translation[2]
-            matrix = f"1 0 0 0 1 0 0 0 1 {tx:.6f} {ty:.6f} {tz:.6f}"
-            ET.SubElement(build, "item", objectid=str(object_id), transform=matrix)
-        
-        tree = ET.ElementTree(root)
-        ET.indent(tree, space="  ")
-        tree.write(base_path / "3D" / "3dmodel.model", encoding="utf-8", xml_declaration=True)
+            vertices = mesh_data["vertices"]
+            if not vertices:
+                raise ValueError(f"Placement {idx} has no vertices")
+            mins = [min(vertex[axis] for vertex in vertices) for axis in range(3)]
+            maxs = [max(vertex[axis] for vertex in vertices) for axis in range(3)]
+            center = [(mins[axis] + maxs[axis]) / 2 for axis in range(3)]
+            translation = placement["translation"]
+            placed_center = [
+                translation[axis] + center[axis] for axis in range(3)
+            ]
+            matrix = (
+                f"1 0 0 0 1 0 0 0 1 "
+                f"{placed_center[0]:.9g} {placed_center[1]:.9g} "
+                f"{placed_center[2]:.9g}"
+            )
+
+            color = (placement.get("color_rgb") or "808080").strip().upper()
+            if len(color) != 6 or any(char not in "0123456789ABCDEF" for char in color):
+                color = "808080"
+            extruder = str(unique_colors.index(color) + 1)
+
+            path = f"/3D/Objects/object_{idx + 1}.model"
+            outer_uuid = str(uuid4())
+            component_uuid = str(uuid4())
+            obj = ET.SubElement(
+                resources,
+                "object",
+                {
+                    "id": str(object_id),
+                    "p:UUID": outer_uuid,
+                    "type": "model",
+                },
+            )
+            components = ET.SubElement(obj, "components")
+            ET.SubElement(
+                components,
+                "component",
+                {
+                    "p:path": path,
+                    "objectid": str(mesh_object_id),
+                    "p:UUID": component_uuid,
+                    "transform": identity_transform,
+                },
+            )
+
+            mesh_root = ET.Element("model", {
+                "unit": "millimeter",
+                "xml:lang": "en-US",
+                "xmlns": NS_CORE,
+                "xmlns:BambuStudio": NS_BAMBU,
+                "xmlns:p": NS_P,
+                "requiredextensions": "p",
+            })
+            self._add_metadata(mesh_root, "BambuStudio:3mfVersion", "1")
+            mesh_resources = ET.SubElement(mesh_root, "resources")
+            mesh_obj = ET.SubElement(
+                mesh_resources,
+                "object",
+                {
+                    "id": str(mesh_object_id),
+                    "p:UUID": str(uuid4()),
+                    "type": "model",
+                },
+            )
+            mesh_element = ET.SubElement(mesh_obj, "mesh")
+            vertices_element = ET.SubElement(mesh_element, "vertices")
+            triangles_element = ET.SubElement(mesh_element, "triangles")
+            for vertex in vertices:
+                ET.SubElement(
+                    vertices_element,
+                    "vertex",
+                    x=f"{vertex[0] - center[0]:.9g}",
+                    y=f"{vertex[1] - center[1]:.9g}",
+                    z=f"{vertex[2] - center[2]:.9g}",
+                )
+            for triangle in mesh_data["triangles"]:
+                ET.SubElement(
+                    triangles_element,
+                    "triangle",
+                    v1=str(triangle[0]),
+                    v2=str(triangle[1]),
+                    v3=str(triangle[2]),
+                )
+            ET.SubElement(mesh_root, "build")
+            mesh_path = base_path / "3D" / "Objects" / f"object_{idx + 1}.model"
+            self._write_xml(mesh_root, mesh_path)
+
+            ET.SubElement(
+                relationships,
+                "Relationship",
+                Target=path,
+                Id=f"rel-{idx + 1}",
+                Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel",
+            )
+            ET.SubElement(
+                build,
+                "item",
+                {
+                    "objectid": str(object_id),
+                    "p:UUID": str(uuid4()),
+                    "transform": matrix,
+                    "printable": "1",
+                },
+            )
+
+            part_name = (
+                f"{placement.get('ldraw_id', 'part')}_"
+                f"{placement.get('instance_num', idx + 1)}.stl"
+            )
+            part = ET.SubElement(
+                model_settings, "object", id=str(object_id)
+            )
+            ET.SubElement(part, "metadata", key="name", value=part_name)
+            ET.SubElement(part, "metadata", key="extruder", value=extruder)
+            ET.SubElement(
+                part, "metadata", face_count=str(len(mesh_data["triangles"]))
+            )
+            part_uuid = str(uuid4())
+            part_settings = ET.SubElement(
+                part,
+                "part",
+                id=str(mesh_object_id),
+                subtype="normal_part",
+                uuid=part_uuid,
+            )
+            ET.SubElement(part_settings, "metadata", key="name", value=part_name)
+            ET.SubElement(
+                part_settings,
+                "metadata",
+                key="matrix",
+                value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1",
+            )
+            ET.SubElement(
+                part_settings, "metadata", key="source_file", value="BrickGen"
+            )
+            ET.SubElement(
+                part_settings, "metadata", key="source_object_id", value="0"
+            )
+            ET.SubElement(
+                part_settings, "metadata", key="source_volume_id", value="0"
+            )
+            for axis, value in zip("xyz", center):
+                ET.SubElement(
+                    part_settings,
+                    "metadata",
+                    key=f"source_offset_{axis}",
+                    value=f"{value:.9g}",
+                )
+            ET.SubElement(
+                part_settings,
+                "mesh_stat",
+                face_count=str(len(mesh_data["triangles"])),
+                edges_fixed="0",
+                degenerate_facets="0",
+                facets_removed="0",
+                facets_reversed="0",
+                backwards_edges="0",
+            )
+            plate_index = max(0, int(placement.get("plate_index", 0)))
+            model_instance = ET.SubElement(plates[plate_index], "model_instance")
+            ET.SubElement(
+                model_instance, "metadata", key="object_id", value=str(object_id)
+            )
+            ET.SubElement(
+                model_instance, "metadata", key="instance_id", value="0"
+            )
+            ET.SubElement(
+                model_instance,
+                "metadata",
+                key="identify_id",
+                value=str(idx + 1),
+            )
+
+        ET.SubElement(model_settings, "assemble")
+        self._write_xml(root, base_path / "3D" / "3dmodel.model")
+        self._write_xml(
+            relationships,
+            base_path / "3D" / "_rels" / "3dmodel.model.rels",
+        )
+        self._write_xml(
+            model_settings,
+            base_path / "Metadata" / "model_settings.config",
+        )
+
+    @staticmethod
+    def _add_metadata(parent: ET.Element, name: str, value: str) -> None:
+        ET.SubElement(parent, "metadata", name=name).text = value
+
+    @staticmethod
+    def _write_xml(root: ET.Element, path: Path) -> None:
+        ET.indent(root, space=" ")
+        ET.ElementTree(root).write(
+            path,
+            encoding="UTF-8",
+            xml_declaration=True,
+        )

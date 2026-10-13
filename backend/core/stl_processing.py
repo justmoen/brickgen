@@ -5,6 +5,7 @@ from typing import Optional, TYPE_CHECKING
 from backend.config import settings
 from backend.core.ldview_converter import LDViewConverter, get_ldview_quality_key
 from backend.core.stl_orientation import STLOrienter
+from backend.core.mesh_repair_single import repair_single_file_inplace
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -64,7 +65,7 @@ class STLConverter:
         rotation_z: float = 0.0,
         db: Optional["Session"] = None,
     ) -> Optional[Path]:
-        """Get cached STL or convert from LDraw. When db is provided, lookups are DB-first; if DB row exists but file is missing, regenerate at expected path."""
+        """Get cached STL or convert from LDraw."""
         if not ldraw_id:
             logger.warning("No LDraw ID provided")
             return None
@@ -75,68 +76,75 @@ class STLConverter:
         )
         stl_path = self.cache_dir / f"{stem}.stl"
 
+        # --- 1. FIRST CHECK THE CACHE LAYERS NATIVELY ---
         if db is not None and not bypass_cache:
             from backend.database import STLCache
-
-            row = (
-                db.query(STLCache)
-                .filter(
-                    STLCache.part_num == ldraw_id,
-                    STLCache.scale == scale_factor,
-                    STLCache.rotation_enabled == rotation_enabled,
-                    STLCache.rotation_x == rotation_x,
-                    STLCache.rotation_y == rotation_y,
-                    STLCache.rotation_z == rotation_z,
-                    STLCache.quality_key == quality_key,
-                )
-                .first()
-            )
+            row = db.query(STLCache).filter(
+                STLCache.part_num == ldraw_id,
+                STLCache.scale == scale_factor,
+                STLCache.rotation_enabled == rotation_enabled,
+                STLCache.rotation_x == rotation_x,
+                STLCache.rotation_y == rotation_y,
+                STLCache.rotation_z == rotation_z,
+                STLCache.quality_key == quality_key,
+            ).first()
             if row is not None:
                 path = Path(row.file_path)
                 if path.exists():
                     logger.debug(f"Using cached STL for {ldraw_id} from DB")
                     return path
-                # File missing: regenerate at expected path
-                logger.info(f"STL cache DB hit but file missing for {ldraw_id}, regenerating at {stl_path}")
-            # No row or file missing: fall through to convert and then insert/update
+                else:
+                    logger.info(f"STL cache DB hit but file missing for {ldraw_id}, cleaning up stale row...")
+                    db.delete(row)
+                    db.commit()
+
         elif stl_path.exists() and not bypass_cache:
             logger.debug(f"Using cached STL for {ldraw_id} (filesystem)")
             return stl_path
 
+        # --- 2. GENERATE VIA LDVIEW AND APPLY ORIENTATION ---
         rot_detail = f", rotation=({rotation_x}, {rotation_y}, {rotation_z})" if rotation_enabled else ""
-        logger.info(
-            f"Converting {ldraw_id} with LDView (scale={scale_factor}, rotation_enabled={rotation_enabled}{rot_detail}, quality_key={quality_key})..."
-        )
+        logger.info(f"Converting {ldraw_id} with LDView (scale={scale_factor})...")
+        
         if not self.converter.convert_to_stl(ldraw_id, stl_path, scale_factor=scale_factor):
             logger.warning(f"Failed to convert {ldraw_id} to STL")
             return None
 
+        # ==========================================================
+        # INJECT PRE-CACHE INTERCEPT START (THE ABSOLUTE TRUE LOCATION)
+        # ==========================================================
+        # We intercept and overwrite the raw STL via Formware IMMEDIATELY after generation.
+        # This ensures the rotation utility, the 3MF engine, and the DB sizes all process
+        # the ALREADY-REPAIRED, clean model geometry!
+        if stl_path and stl_path.exists():
+            try:
+                logger.info(f"[Pre-Cache Hook] Repairing and transcoding raw mesh from converter: {stl_path.name}")
+                repair_single_file_inplace(stl_path)
+            except Exception as repair_err:
+                logger.error(f"[Pre-Cache Hook Warning] Inline mesh repair failed: {repair_err}", exc_info=True)
+        # ==========================================================
+        # INJECT PRE-CACHE INTERCEPT END
+        # ==========================================================
+
         if rotation_enabled and (rotation_x != 0 or rotation_y != 0 or rotation_z != 0):
-            logger.info(
-                f"Applying rotation for {ldraw_id} (X={rotation_x}, Y={rotation_y}, Z={rotation_z})..."
-            )
-            if not self.orienter.apply_absolute_rotation(
-                stl_path, rotation_x, rotation_y, rotation_z
-            ):
+            logger.info(f"Applying rotation for {ldraw_id}...")
+            if not self.orienter.apply_absolute_rotation(stl_path, rotation_x, rotation_y, rotation_z):
                 logger.warning(f"Rotation failed for {ldraw_id}, using unconverted orientation")
 
+        # --- 3. SAVE THE CLEAN DATA TRACK TO THE DATABASE ---
         if db is not None:
             from backend.database import STLCache
-
             file_size = stl_path.stat().st_size if stl_path.exists() else 0
-            row = (
-                db.query(STLCache)
-                .filter(
-                    STLCache.part_num == ldraw_id,
-                    STLCache.scale == scale_factor,
-                    STLCache.rotation_enabled == rotation_enabled,
-                    STLCache.rotation_x == rotation_x,
-                    STLCache.rotation_y == rotation_y,
-                    STLCache.rotation_z == rotation_z,
-                    STLCache.quality_key == quality_key,
-                )
-                .first()
-            )
+            row = db.query(STLCache).filter(
+                STLCache.part_num == ldraw_id,
+                STLCache.scale == scale_factor,
+                STLCache.rotation_enabled == rotation_enabled,
+                STLCache.rotation_x == rotation_x,
+                STLCache.rotation_y == rotation_y,
+                STLCache.rotation_z == rotation_z,
+                STLCache.quality_key == quality_key,
+            ).first()
+            
             if row is not None:
                 row.file_path = str(stl_path)
                 row.file_size = file_size

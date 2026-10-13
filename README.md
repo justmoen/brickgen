@@ -91,9 +91,9 @@ docker-compose logs -f brickgen
 
 ### 3MF and slicers
 
-- **Multiple build plates**: If parts don’t fit on one plate, Brickgen adds more logical plates (stacked in Y) in the same 3MF so everything is packed.
-- **Colors**: Part colors from Rebrickable are written into the 3MF (Materials Extension) so slicers can show colored parts.
-- **Bambu Studio**: When you open a 3MF that wasn’t created by Bambu Lab, Bambu may show “load geometry data and color data only” and can ignore placement, so parts may appear stacked in the center. Use the slicer’s own “Arrange” or placement tools if needed. Other slicers that support 3MF Core (e.g. PrusaSlicer, Cura) should respect the packed placement.
+- **Multiple build plates**: If parts don’t fit on one plate, Brickgen creates additional Bambu Studio plates in the same 3MF.
+- **Colors**: Part colors from Rebrickable are assigned to Bambu Studio filament slots (up to four distinct colors).
+- **Bambu Studio**: Generated 3MFs include a Bambu Studio project configuration for the Bambu Lab A1 0.4 mm nozzle, using the `0.20mm PETG LEGO` process and `Generic PETG @BBL A1 - LEGO` filament presets. Other slicers may load the 3MF geometry without using this Bambu-specific configuration.
 
 ## Configuration
 

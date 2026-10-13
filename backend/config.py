@@ -125,6 +125,12 @@ class Settings(BaseSettings):
 settings = Settings()
 
 # Ensure directories exist
+from pathlib import Path
+settings.cache_dir = Path("./cache")
+settings.output_dir = Path("./cache/outputs")
+settings.database_path = Path("./database/brickgen.db")
+settings.ldraw_library_path = Path("./cache/ldraw")
 settings.cache_dir.mkdir(parents=True, exist_ok=True)
 settings.output_dir.mkdir(parents=True, exist_ok=True)
 settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+settings.ldraw_library_path.mkdir(parents=True, exist_ok=True)

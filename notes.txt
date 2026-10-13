@@ -1,0 +1,4 @@
+PIPENV_PIPFILE="$PWD/backend/Pipfile" python3 -m pipenv run uvicorn backend.main:app --reload --port 8000
+cd frontend
+npm run dev
+

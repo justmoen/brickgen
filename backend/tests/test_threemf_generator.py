@@ -1,11 +1,10 @@
 """Unit tests for backend.core.threemf_generator."""
 import zipfile
+import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-import pytest
-
-from backend.core.threemf_generator import ThreeMFGenerator, NS_M
+from backend.core.threemf_generator import ThreeMFGenerator
 
 
 # --- ASCII STL helpers for tests ---
@@ -75,6 +74,24 @@ class TestThreeMFGeneratorParseStl:
         result = gen._parse_stl(Path("/nonexistent/file.stl"))
         assert result is None
 
+    def test_welds_shared_vertices_repeated_by_stl_facets(self, tmp_path):
+        stl = tmp_path / "88646_1.stl"
+        vertices = [
+            [0, 0, 0],
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, 1],
+        ]
+        triangles = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
+        _write_ascii_stl(stl, vertices, triangles)
+
+        mesh = ThreeMFGenerator()._parse_stl(stl)
+
+        assert mesh is not None
+        assert len(mesh["vertices"]) == 4
+        assert len(mesh["triangles"]) == 4
+        assert all(len(set(triangle)) == 3 for triangle in mesh["triangles"])
+
 
 class TestThreeMFGeneratorPackParts:
     def test_single_part_fits(self):
@@ -129,10 +146,26 @@ class TestThreeMFGeneratorCreate3mf:
         assert gen._create_3mf_file(placements, out) is True
         assert out.exists()
         with zipfile.ZipFile(out, "r") as zf:
-            names = zf.namelist()
+            names = set(zf.namelist())
+            project_settings = json.loads(zf.read("Metadata/project_settings.config"))
+            model_settings = ET.fromstring(zf.read("Metadata/model_settings.config"))
+            model = ET.fromstring(zf.read("3D/3dmodel.model"))
         assert "[Content_Types].xml" in names
         assert "_rels/.rels" in names
         assert "3D/3dmodel.model" in names
+        assert "3D/Objects/object_1.model" in names
+        assert "3D/_rels/3dmodel.model.rels" in names
+        assert "Metadata/slice_info.config" in names
+        assert model.attrib["requiredextensions"] == "p"
+        model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+        ns = {"m": model_ns}
+        assert model.find("./m:metadata[@name='Application']", ns).text.startswith("BambuStudio-")
+        assert len(model_settings.findall("./object")) == 1
+        assert project_settings["printer_model"] == "Bambu Lab A1"
+        assert project_settings["print_settings_id"] == "0.20mm PETG LEGO"
+        assert project_settings["filament_settings_id"] == [
+            "Generic PETG @BBL A1 - LEGO"
+        ] * 4
 
     def test_3mf_model_has_mesh_and_build_item(self, tmp_path):
         gen = ThreeMFGenerator()
@@ -144,22 +177,62 @@ class TestThreeMFGeneratorCreate3mf:
             {
                 "mesh_data": mesh,
                 "translation": [1.0, 2.0, 0.0],
-                "ldraw_id": "3005",
+                "ldraw_id": "88646",
                 "instance_num": 1,
                 "color_rgb": None,
             }
         ]
         out = tmp_path / "out.3mf"
-        gen._create_3mf_file(placements, out)
+        assert gen._create_3mf_file(placements, out) is True
         with zipfile.ZipFile(out, "r") as zf:
             raw = zf.read("3D/3dmodel.model").decode("utf-8")
+            mesh_raw = zf.read("3D/Objects/object_1.model").decode("utf-8")
+            model_settings = ET.fromstring(zf.read("Metadata/model_settings.config"))
         root = ET.fromstring(raw)
+        mesh_root = ET.fromstring(mesh_raw)
         model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
         ns = {"m": model_ns}
-        vertices = root.findall(".//m:vertices", ns)
+        vertices = mesh_root.findall(".//m:vertices", ns)
         build_items = root.findall(".//m:item", ns)
         assert len(vertices) >= 1
         assert len(build_items) >= 1
+        assert model_settings.find("./plate/model_instance/metadata[@key='object_id']").attrib["value"] == "2"
+        object_name = model_settings.find("./object/metadata[@key='name']")
+        assert object_name.attrib["value"] == "88646_1.stl"
+
+    def test_3mf_preserves_multiple_build_plates(self, tmp_path):
+        gen = ThreeMFGenerator(part_spacing=1)
+        mesh = {
+            "vertices": [[0, 0, 0], [4, 0, 0], [0, 4, 1]],
+            "triangles": [[0, 1, 2]],
+        }
+        bbox = {
+            "min": [0, 0, 0],
+            "max": [4, 4, 1],
+            "size": [4, 4, 1],
+            "center": [2, 2, 0.5],
+        }
+        placements = gen._pack_parts(
+            [{"mesh_data": mesh, "ldraw_id": "3005", "quantity": 2, "bbox": bbox}],
+            plate_width=10,
+            plate_depth=6,
+            plate_height=10,
+        )
+        assert placements is not None
+        assert [placement["plate_index"] for placement in placements] == [0, 1]
+        assert placements[0]["translation"][1] == placements[1]["translation"][1]
+
+        out = tmp_path / "multi-plate.3mf"
+        assert gen._create_3mf_file(placements, out) is True
+        with zipfile.ZipFile(out, "r") as zf:
+            model_settings = ET.fromstring(zf.read("Metadata/model_settings.config"))
+        plates = model_settings.findall("./plate")
+        assert len(plates) == 2
+        assert [
+            plate.find("./metadata[@key='plater_id']").attrib["value"]
+            for plate in plates
+        ] == ["1", "2"]
+        assert all(len(plate.findall("./model_instance")) == 1 for plate in plates)
 
 
 class TestThreeMFGeneratorGenerate3mf:
@@ -180,3 +253,33 @@ class TestThreeMFGeneratorGenerate3mf:
         out = tmp_path / "project.3mf"
         assert gen.generate_3mf(parts, plate_width=220, plate_depth=220, plate_height=250, output_path=out) is True
         assert out.exists()
+
+    def test_generated_3mf_uses_repaired_stl_topology_and_name(self, tmp_path):
+        stl = tmp_path / "88646_1.stl"
+        vertices = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]
+        triangles = [[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]
+        _write_ascii_stl(stl, vertices, triangles)
+        out = tmp_path / "project.3mf"
+
+        gen = ThreeMFGenerator()
+        assert gen.generate_3mf(
+            [(str(stl), "88646", 1)],
+            plate_width=220,
+            plate_depth=220,
+            plate_height=250,
+            output_path=out,
+        )
+
+        with zipfile.ZipFile(out, "r") as archive:
+            mesh = ET.fromstring(archive.read("3D/Objects/object_1.model"))
+            model_settings = ET.fromstring(
+                archive.read("Metadata/model_settings.config")
+            )
+        model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+        ns = {"m": model_ns}
+        assert len(mesh.findall(".//m:vertex", ns)) == 4
+        assert len(mesh.findall(".//m:triangle", ns)) == 4
+        assert (
+            model_settings.find("./object/metadata[@key='name']").attrib["value"]
+            == "88646_1.stl"
+        )
