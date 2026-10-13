@@ -515,8 +515,8 @@ function SettingsPage() {
                   )}
                   <div className="flex items-center justify-between p-4 bg-dk-1 rounded">
                     <div>
-                      <label htmlFor="matchPreview" className="text-sm font-medium block mb-1 text-dk-5">Default orientation (match preview)</label>
-                      <p className="text-xs text-dk-5/80">When rotation is off, apply X=-90° so STL matches part preview (studs up).</p>
+                      <label htmlFor="matchPreview" className="text-sm font-medium block mb-1 text-dk-5">Default orientation (studs up)</label>
+                      <p className="text-xs text-dk-5/80">When rotation is off, apply X=-90° so LDraw studs face up on the Z-axis.</p>
                     </div>
                     <input type="checkbox" id="matchPreview" checked={settings.default_orientation_match_preview !== false} onChange={(e) => handleChange('default_orientation_match_preview', e.target.checked)} className="w-6 h-6 text-mint border-dk-3 rounded focus:ring-mint" />
                   </div>

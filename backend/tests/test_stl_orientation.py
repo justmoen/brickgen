@@ -17,6 +17,14 @@ class TestSTLOrienterRotationMatrices:
         ])
         np.testing.assert_array_almost_equal(r, expected)
 
+    def test_default_x_rotation_maps_ldraw_studs_to_z_up(self):
+        rotation = STLOrienter._rotation_matrix_x(-90)
+        ldraw_stud_direction = np.array([0, -1, 0])
+
+        np.testing.assert_array_almost_equal(
+            ldraw_stud_direction @ rotation.T, [0, 0, 1]
+        )
+
     def test_rotation_x_zero(self):
         r = STLOrienter._rotation_matrix_x(0)
         np.testing.assert_array_almost_equal(r, np.eye(3))
@@ -107,4 +115,3 @@ class TestSTLOrienterApplyAbsoluteRotation:
     def test_nonexistent_file_returns_false(self):
         orienter = STLOrienter()
         assert orienter.apply_absolute_rotation(Path("/nonexistent.stl"), 90, 0, 0) is False
-

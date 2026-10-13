@@ -202,7 +202,7 @@ async def process_generation(
                 job_log.append(line)
                 continue
 
-            # Use per-part rotation if set, else global, else "match preview" default (X=-90 so STL matches LDView preview)
+            # Use per-part rotation if set, else global, else default studs-up orientation.
             pr = per_part_rotation.get(ldraw_id)
             if pr is not None and isinstance(pr, dict):
                 use_rot = True

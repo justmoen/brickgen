@@ -783,16 +783,15 @@ apiFetch(`/api/jobs/${jobId}`)
                   return { rx: 0, ry: 0, rz: 0 }
                 }
                 const getEffectiveRotation = (part) => {
-                  const rot = perPartRotation[part.ldraw_id] || { x: 0, y: 0, z: 0 }
-                  const hasPerPart = (rot.x != null && rot.x !== '') || (rot.y != null && rot.y !== '') || (rot.z != null && rot.z !== '')
-                  if (hasPerPart) return { rx: Number(rot.x) || 0, ry: Number(rot.y) || 0, rz: Number(rot.z) || 0 }
+                  const rot = perPartRotation[part.ldraw_id]
+                  if (rot) return { rx: Number(rot.x) || 0, ry: Number(rot.y) || 0, rz: Number(rot.z) || 0 }
                   return getDefaultRotation()
                 }
                 const getPreviewRotation = (part) => previewRotationByPart[part.ldraw_id] ?? getDefaultRotation()
                 const rotationEqual = (a, b) => a.rx === b.rx && a.ry === b.ry && a.rz === b.rz
                 return (
                   <div className="space-y-3">
-                    <p className="text-sm text-dk-5/80">Optional: set rotation (X, Y, Z degrees) per part. Parts not listed use global rotation from Settings. Click &quot;Update&quot; to refresh the preview after changing rotation.</p>
+                    <p className="text-sm text-dk-5/80">Optional: set rotation (X, Y, Z degrees) per part. Parts not customized use the global rotation or the default studs-up orientation from Settings. Click &quot;Update&quot; to refresh the preview after changing rotation.</p>
                     <div className="max-h-80 overflow-y-auto space-y-3 border border-dk-3 rounded p-2 bg-dk-1">
                       {wizardParts.length === 0 ? (
                         <p className="text-sm text-dk-5/80">No parts loaded. Parts will use global rotation.</p>

@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     rotation_x: float = 0.0
     rotation_y: float = 0.0
     rotation_z: float = 0.0
-    # When True, apply X=-90° to STLs when rotation is off so orientation matches LDView preview (studs up)
+    # When True, apply X=-90° to STLs when rotation is off so LDraw -Y (studs up) maps to +Z.
     default_orientation_match_preview: bool = True
 
     # Part previews: when True, frontend may request preview images (lazy) for parts

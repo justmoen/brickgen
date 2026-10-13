@@ -1,6 +1,7 @@
 """3MF file generation with bin packing for 3D printing."""
 import json
 import logging
+import math
 import os
 import zipfile
 import xml.etree.ElementTree as ET
@@ -22,6 +23,7 @@ PRINTER_PRESET = "Bambu Lab A1 0.4 nozzle"
 PROCESS_PRESET = "0.20mm PETG LEGO"
 FILAMENT_PRESET = "Generic PETG @BBL A1 - LEGO"
 BAMBU_VERSION = "02.08.02.61"
+BAMBU_PLATE_GRID_PITCH = 307.2
 BAMBU_SETTINGS_TEMPLATE = Path(__file__).with_name("bambu_a1_petg_project_settings.json")
 
 ET.register_namespace("", NS_CORE)
@@ -31,6 +33,15 @@ ET.register_namespace("BambuStudio", NS_BAMBU)
 
 class ThreeMFGenerator:
     """Generate 3MF files with parts arranged on build plate using bin packing."""
+
+    @staticmethod
+    def _normalize_color(color: Optional[str]) -> str:
+        normalized = (color or "808080").strip().lstrip("#").upper()
+        if len(normalized) != 6 or any(
+            char not in "0123456789ABCDEF" for char in normalized
+        ):
+            return "808080"
+        return normalized
     
     def __init__(self, part_spacing: int = 2):
         """Initialize generator.
@@ -179,91 +190,98 @@ class ThreeMFGenerator:
         """
         placements = []
         
-        # Build instance list (one per quantity) and carry color
-        instances = []
+        # Keep each color on its own plate; split it further only if it does not fit.
+        instances_by_color = {}
         for part in part_meshes:
+            color = self._normalize_color(part.get('color_rgb'))
+            color_instances = instances_by_color.setdefault(color, [])
             for i in range(part['quantity']):
-                instances.append({
+                color_instances.append({
                     'mesh_data': part['mesh_data'],
                     'ldraw_id': part['ldraw_id'],
                     'bbox': part['bbox'],
                     'instance_num': i + 1,
-                    'color_rgb': part.get('color_rgb'),
+                    'color_rgb': color,
                 })
-
-        instances.sort(key=lambda x: x['bbox']['size'][0] * x['bbox']['size'][1], reverse=True)
         
-        plate_gap = 10  # mm between logical plates
-        plate_offset_y = 0.0
-        shelves = []
-        current_y = 0.0
+        next_plate_index = 0
 
-        for instance in instances:
-            bbox = instance['bbox']
-            # FIX: Bind the coordinate elements properly
-            width = bbox['size'][0]
-            depth = bbox['size'][1]
-            height = bbox['size'][2]
-            width_with_spacing = width + self.part_spacing
-            depth_with_spacing = depth + self.part_spacing
-            
-            placed = False
-            for shelf in shelves:
-                if shelf['width_remaining'] >= width_with_spacing and current_y + depth_with_spacing <= plate_depth:
-                    x_pos = shelf['x']
-                    y_pos = shelf['y']
-                    # FIX: Append coordinate arrays, [1], [2]
+        for color_instances in instances_by_color.values():
+            color_instances.sort(
+                key=lambda item: item['bbox']['size'][0] * item['bbox']['size'][1],
+                reverse=True,
+            )
+            local_plate_index = 0
+            shelves = []
+            current_y = 0.0
+
+            for instance in color_instances:
+                bbox = instance['bbox']
+                width, depth, height = bbox['size']
+                width_with_spacing = width + self.part_spacing
+                depth_with_spacing = depth + self.part_spacing
+
+                placed = False
+                for shelf in shelves:
+                    if (
+                        shelf['width_remaining'] >= width_with_spacing
+                        and current_y + depth_with_spacing <= plate_depth
+                    ):
+                        x_pos = shelf['x']
+                        y_pos = shelf['y']
+                        translation = [
+                            x_pos + width / 2 - bbox['center'][0],
+                            y_pos + depth / 2 - bbox['center'][1],
+                            -bbox['min'][2],
+                        ]
+                        placements.append({
+                            'mesh_data': instance['mesh_data'],
+                            'translation': translation,
+                            'plate_index': next_plate_index + local_plate_index,
+                            'ldraw_id': instance['ldraw_id'],
+                            'instance_num': instance['instance_num'],
+                            'color_rgb': instance['color_rgb'],
+                        })
+                        shelf['x'] += width_with_spacing
+                        shelf['width_remaining'] -= width_with_spacing
+                        shelf['height'] = max(shelf['height'], height)
+                        placed = True
+                        break
+
+                if not placed:
+                    if shelves and current_y + depth_with_spacing > plate_depth:
+                        local_plate_index += 1
+                        current_y = 0.0
+                        shelves = []
+
+                    x_pos = 0
+                    y_pos = current_y
                     translation = [
                         x_pos + width / 2 - bbox['center'][0],
                         y_pos + depth / 2 - bbox['center'][1],
-                        -bbox['min'][2]
+                        -bbox['min'][2],
                     ]
                     placements.append({
                         'mesh_data': instance['mesh_data'],
                         'translation': translation,
-                        'plate_index': int(plate_offset_y / (plate_depth + plate_gap)),
+                        'plate_index': next_plate_index + local_plate_index,
                         'ldraw_id': instance['ldraw_id'],
                         'instance_num': instance['instance_num'],
-                        'color_rgb': instance.get('color_rgb'),
+                        'color_rgb': instance['color_rgb'],
                     })
-                    shelf['x'] += width_with_spacing
-                    shelf['width_remaining'] -= width_with_spacing
-                    shelf['height'] = max(shelf['height'], height)
-                    placed = True
-                    break
-            
-            if not placed:
-                if current_y + depth_with_spacing > plate_depth:
-                    # Start a new build plate
-                    plate_offset_y += plate_depth + plate_gap
-                    current_y = 0.0
-                    shelves = []
-                
-                x_pos = 0
-                y_pos = current_y
-                translation = [
-                    x_pos + width / 2 - bbox['center'][0],
-                    y_pos + depth / 2 - bbox['center'][1],
-                    -bbox['min'][2]
-                ]
-                placements.append({
-                    'mesh_data': instance['mesh_data'],
-                    'translation': translation,
-                    'plate_index': int(plate_offset_y / (plate_depth + plate_gap)),
-                    'ldraw_id': instance['ldraw_id'],
-                    'instance_num': instance['instance_num'],
-                    'color_rgb': instance.get('color_rgb'),
-                })
-                shelves.append({
-                    'y': current_y,
-                    'height': height,
-                    'x': width_with_spacing,
-                    'width_remaining': plate_width - width_with_spacing
-                })
-                current_y += height + self.part_spacing
-        
-        num_plates = 1 + int(plate_offset_y / (plate_depth + plate_gap)) if plate_offset_y > 0 else 1
-        logger.info(f"Packed {len(placements)} parts onto {num_plates} build plate(s)")
+                    shelves.append({
+                        'y': current_y,
+                        'height': height,
+                        'x': width_with_spacing,
+                        'width_remaining': plate_width - width_with_spacing,
+                    })
+                    current_y += height + self.part_spacing
+
+            next_plate_index += local_plate_index + 1
+
+        logger.info(
+            f"Packed {len(placements)} parts onto {next_plate_index} build plate(s)"
+        )
         return placements
     
     def _create_3mf_file(
@@ -339,17 +357,12 @@ class ThreeMFGenerator:
 
         colors = []
         for placement in placements:
-            color = (placement.get("color_rgb") or "808080").strip().upper()
-            if len(color) != 6 or any(char not in "0123456789ABCDEF" for char in color):
-                color = "808080"
+            color = self._normalize_color(placement.get("color_rgb"))
             if color not in colors:
                 colors.append(color)
-        if len(colors) > 4:
-            raise ValueError(
-                "Bambu Lab A1 project export supports at most four distinct part colors"
-            )
 
         colors.extend([colors[0] if colors else "808080"] * (4 - len(colors)))
+        filament_count = len(colors)
         settings.update({
             "printer_model": PRINTER_MODEL,
             "printer_settings_id": PRINTER_PRESET,
@@ -358,15 +371,28 @@ class ThreeMFGenerator:
             "print_settings_id": PROCESS_PRESET,
             "default_print_profile": "0.20mm Standard @BBL A1",
             "default_filament_profile": [FILAMENT_PRESET],
-            "filament_settings_id": [FILAMENT_PRESET] * 4,
-            "filament_type": ["PETG"] * 4,
-            "filament_vendor": ["Generic"] * 4,
-            "filament_extruder_variant": ["Direct Drive Standard"] * 4,
-            "filament_flow_ratio": ["0.96"] * 4,
-            "nozzle_temperature_range_low": ["240"] * 4,
-            "nozzle_temperature_range_high": ["250"] * 4,
+            "filament_settings_id": [FILAMENT_PRESET] * filament_count,
+            "filament_type": ["PETG"] * filament_count,
+            "filament_vendor": ["Generic"] * filament_count,
+            "filament_extruder_variant": ["Direct Drive Standard"] * filament_count,
+            "filament_flow_ratio": ["0.96"] * filament_count,
+            "nozzle_temperature_range_low": ["240"] * filament_count,
+            "nozzle_temperature_range_high": ["250"] * filament_count,
             "filament_colour": [f"#{color}" for color in colors],
         })
+        for key, value in tuple(settings.items()):
+            if (
+                isinstance(value, list)
+                and len(value) == 4
+                and (key.startswith("filament_") or key.startswith("nozzle_temperature_range_"))
+            ):
+                settings[key] = value + [value[-1]] * (filament_count - 4)
+        settings["filament_self_index"] = [
+            str(index) for index in range(1, filament_count + 1)
+        ]
+        settings["filament_colour"] = [f"#{color}" for color in colors]
+        settings["filament_multi_colour"] = [f"#{color}" for color in colors]
+        settings["default_filament_colour"] = [f"#{color}" for color in colors]
 
         config_dir = base_path / "Metadata"
         config_dir.mkdir(exist_ok=True)
@@ -416,13 +442,22 @@ class ThreeMFGenerator:
             max(0, int(placement.get("plate_index", 0)))
             for placement in placements
         })
+        # Bambu lays plate origins out in a square-ish grid at this fixed pitch.
+        plate_grid_columns = math.ceil(math.sqrt(max(plate_indices, default=0) + 1))
         plates = {}
+        plate_colors = {}
+        for placement in placements:
+            plate_index = max(0, int(placement.get("plate_index", 0)))
+            plate_colors.setdefault(
+                plate_index, self._normalize_color(placement.get("color_rgb"))
+            )
         for plate_index in plate_indices:
-            plate = ET.SubElement(model_settings, "plate")
+            plate = ET.Element("plate")
             plates[plate_index] = plate
+            plate_color = plate_colors.get(plate_index, "808080")
             for key, value in (
                 ("plater_id", str(plate_index + 1)),
-                ("plater_name", f"Plate {plate_index + 1}"),
+                ("plater_name", f"Plate {plate_index + 1} - #{plate_color}"),
                 ("locked", "false"),
                 ("filament_map_mode", "Auto For Flush"),
                 ("filament_maps", "1 1 1 1"),
@@ -431,13 +466,10 @@ class ThreeMFGenerator:
                 ET.SubElement(plate, "metadata", key=key, value=value)
 
         identity_transform = "1 0 0 0 1 0 0 0 1 0 0 0"
+        assemble = ET.Element("assemble")
         unique_colors = []
         for candidate in placements:
-            candidate_color = (candidate.get("color_rgb") or "808080").strip().upper()
-            if len(candidate_color) != 6 or any(
-                char not in "0123456789ABCDEF" for char in candidate_color
-            ):
-                candidate_color = "808080"
+            candidate_color = self._normalize_color(candidate.get("color_rgb"))
             if candidate_color not in unique_colors:
                 unique_colors.append(candidate_color)
 
@@ -452,8 +484,13 @@ class ThreeMFGenerator:
             maxs = [max(vertex[axis] for vertex in vertices) for axis in range(3)]
             center = [(mins[axis] + maxs[axis]) / 2 for axis in range(3)]
             translation = placement["translation"]
+            plate_index = max(0, int(placement.get("plate_index", 0)))
+            plate_column = plate_index % plate_grid_columns
+            plate_row = plate_index // plate_grid_columns
             placed_center = [
-                translation[axis] + center[axis] for axis in range(3)
+                translation[0] + center[0] + plate_column * BAMBU_PLATE_GRID_PITCH,
+                translation[1] + center[1] - plate_row * BAMBU_PLATE_GRID_PITCH,
+                translation[2] + center[2],
             ]
             matrix = (
                 f"1 0 0 0 1 0 0 0 1 "
@@ -461,9 +498,7 @@ class ThreeMFGenerator:
                 f"{placed_center[2]:.9g}"
             )
 
-            color = (placement.get("color_rgb") or "808080").strip().upper()
-            if len(color) != 6 or any(char not in "0123456789ABCDEF" for char in color):
-                color = "808080"
+            color = self._normalize_color(placement.get("color_rgb"))
             extruder = str(unique_colors.index(color) + 1)
 
             path = f"/3D/Objects/object_{idx + 1}.model"
@@ -549,6 +584,25 @@ class ThreeMFGenerator:
                     "printable": "1",
                 },
             )
+            ET.SubElement(
+                assemble,
+                "assemble_item",
+                {
+                    "object_id": str(object_id),
+                    "instance_id": "0",
+                    "transform": matrix,
+                    "offset": "0 0 0",
+                },
+            )
+            ET.SubElement(
+                assemble,
+                "assemble_item",
+                {
+                    "object_id": str(object_id),
+                    "volume_id": "0",
+                    "transform": identity_transform,
+                },
+            )
 
             part_name = (
                 f"{placement.get('ldraw_id', 'part')}_"
@@ -603,7 +657,6 @@ class ThreeMFGenerator:
                 facets_reversed="0",
                 backwards_edges="0",
             )
-            plate_index = max(0, int(placement.get("plate_index", 0)))
             model_instance = ET.SubElement(plates[plate_index], "model_instance")
             ET.SubElement(
                 model_instance, "metadata", key="object_id", value=str(object_id)
@@ -618,7 +671,9 @@ class ThreeMFGenerator:
                 value=str(idx + 1),
             )
 
-        ET.SubElement(model_settings, "assemble")
+        for plate_index in plate_indices:
+            model_settings.append(plates[plate_index])
+        model_settings.append(assemble)
         self._write_xml(root, base_path / "3D" / "3dmodel.model")
         self._write_xml(
             relationships,

@@ -161,6 +161,10 @@ class TestThreeMFGeneratorCreate3mf:
         ns = {"m": model_ns}
         assert model.find("./m:metadata[@name='Application']", ns).text.startswith("BambuStudio-")
         assert len(model_settings.findall("./object")) == 1
+        assert len(model_settings.findall("./assemble/assemble_item")) == 2
+        assert [child.tag for child in model_settings] == [
+            "object", "plate", "assemble"
+        ]
         assert project_settings["printer_model"] == "Bambu Lab A1"
         assert project_settings["print_settings_id"] == "0.20mm PETG LEGO"
         assert project_settings["filament_settings_id"] == [
@@ -226,6 +230,7 @@ class TestThreeMFGeneratorCreate3mf:
         assert gen._create_3mf_file(placements, out) is True
         with zipfile.ZipFile(out, "r") as zf:
             model_settings = ET.fromstring(zf.read("Metadata/model_settings.config"))
+            model = ET.fromstring(zf.read("3D/3dmodel.model"))
         plates = model_settings.findall("./plate")
         assert len(plates) == 2
         assert [
@@ -233,6 +238,75 @@ class TestThreeMFGeneratorCreate3mf:
             for plate in plates
         ] == ["1", "2"]
         assert all(len(plate.findall("./model_instance")) == 1 for plate in plates)
+        assert len(model_settings.findall("./assemble/assemble_item")) == 4
+        model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+        build_items = model.findall(
+            "./m:build/m:item",
+            {"m": model_ns},
+        )
+        first_transform = [float(value) for value in build_items[0].get("transform").split()]
+        second_transform = [float(value) for value in build_items[1].get("transform").split()]
+        assert abs(second_transform[9] - first_transform[9] - 307.2) < 1e-6
+        assert second_transform[10] == first_transform[10]
+
+    def test_each_color_gets_a_plate_and_filament_slot(self, tmp_path):
+        gen = ThreeMFGenerator(part_spacing=1)
+        mesh = {
+            "vertices": [[0, 0, 0], [4, 0, 0], [0, 4, 1]],
+            "triangles": [[0, 1, 2]],
+        }
+        bbox = gen._compute_bounding_box(mesh["vertices"])
+        colors = ["FF0000", "00FF00", "0000FF", "FFFF00", "FF00FF"]
+        part_meshes = [
+            {
+                "mesh_data": mesh,
+                "ldraw_id": f"part-{index}",
+                "quantity": 1,
+                "bbox": bbox,
+                "color_rgb": color,
+            }
+            for index, color in enumerate(colors)
+        ]
+        placements = gen._pack_parts(part_meshes, 100, 100, 100)
+
+        assert placements is not None
+        assert [placement["plate_index"] for placement in placements] == list(
+            range(len(colors))
+        )
+        out = tmp_path / "color-plates.3mf"
+        assert gen._create_3mf_file(placements, out)
+        with zipfile.ZipFile(out, "r") as zf:
+            model_settings = ET.fromstring(zf.read("Metadata/model_settings.config"))
+            project_settings = json.loads(zf.read("Metadata/project_settings.config"))
+            model = ET.fromstring(zf.read("3D/3dmodel.model"))
+
+        plates = model_settings.findall("./plate")
+        assert len(plates) == len(colors)
+        assert all(len(plate.findall("./model_instance")) == 1 for plate in plates)
+        assert len(model_settings.findall("./assemble/assemble_item")) == 2 * len(colors)
+        assert [
+            plate.find("./metadata[@key='plater_name']").attrib["value"].split("#")[-1]
+            for plate in plates
+        ] == colors
+        assert project_settings["filament_colour"] == [f"#{color}" for color in colors]
+        assert len(project_settings["filament_settings_id"]) == len(colors)
+        assert [
+            obj.find("./metadata[@key='extruder']").attrib["value"]
+            for obj in model_settings.findall("./object")
+        ] == [str(index) for index in range(1, len(colors) + 1)]
+        model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+        build_items = model.findall(
+            "./m:build/m:item",
+            {"m": model_ns},
+        )
+        transforms = [
+            [float(value) for value in item.get("transform").split()]
+            for item in build_items
+        ]
+        assert abs(transforms[2][9] - transforms[0][9] - 614.4) < 1e-6
+        assert abs(transforms[3][10] - transforms[0][10] + 307.2) < 1e-6
+        assert abs(transforms[4][9] - transforms[0][9] - 307.2) < 1e-6
+        assert abs(transforms[4][10] - transforms[0][10] + 307.2) < 1e-6
 
 
 class TestThreeMFGeneratorGenerate3mf:
