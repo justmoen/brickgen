@@ -185,7 +185,7 @@
         "70",
         "70"
     ],
-    "elefant_foot_compensation": "0.075",
+    "elefant_foot_compensation": "0.15",
     "embedding_wall_into_infill": "0",
     "enable_arc_fitting": "1",
     "enable_circle_compensation": "0",
@@ -1516,10 +1516,10 @@
     "support_speed": [
         "150"
     ],
-    "support_style": "default",
+    "support_style": "snug",
     "support_threshold_angle": "30",
     "support_top_z_distance": "0.2",
-    "support_type": "tree(auto)",
+    "support_type": "normal(manual)",
     "symmetric_infill_y_axis": "0",
     "temperature_vitrification": [
         "70",
@@ -1636,8 +1636,8 @@
     "wrapping_detection_gcode": "",
     "wrapping_detection_layers": "20",
     "wrapping_exclude_area": [],
-    "xy_contour_compensation": "0.05",
-    "xy_hole_compensation": "-0.05",
+    "xy_contour_compensation": "0.07",
+    "xy_hole_compensation": "0",
     "z_direction_outwall_speed_continuous": "0",
     "z_hop": [
         "0.4"
