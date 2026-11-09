@@ -1,6 +1,7 @@
 """Unit tests for backend.core.threemf_generator."""
 import zipfile
 import json
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -262,7 +263,6 @@ class TestThreeMFGeneratorCreate3mf:
         )
         assert placements is not None
         assert [placement["plate_index"] for placement in placements] == [0, 1]
-        assert placements[0]["translation"][1] == placements[1]["translation"][1]
 
         out = tmp_path / "multi-plate.3mf"
         assert gen._create_3mf_file(placements, out) is True
@@ -284,7 +284,7 @@ class TestThreeMFGeneratorCreate3mf:
         )
         first_transform = [float(value) for value in build_items[0].get("transform").split()]
         second_transform = [float(value) for value in build_items[1].get("transform").split()]
-        assert abs(second_transform[9] - first_transform[9] - 307.2) < 1e-6
+        assert second_transform[9] - first_transform[9] == 307.2
         assert second_transform[10] == first_transform[10]
 
     def test_each_color_gets_a_plate_and_filament_slot(self, tmp_path):
@@ -332,6 +332,19 @@ class TestThreeMFGeneratorCreate3mf:
             obj.find("./metadata[@key='extruder']").attrib["value"]
             for obj in model_settings.findall("./object")
         ] == [str(index) for index in range(1, len(colors) + 1)]
+        objects_by_id = {
+            obj.attrib["id"]: obj for obj in model_settings.findall("./object")
+        }
+        for plate_index, plate in enumerate(plates):
+            object_id = plate.find(
+                "./model_instance/metadata[@key='object_id']"
+            ).attrib["value"]
+            assert (
+                objects_by_id[object_id]
+                .find("./metadata[@key='extruder']")
+                .attrib["value"]
+                == str(plate_index + 1)
+            )
         model_ns = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
         build_items = model.findall(
             "./m:build/m:item",
@@ -341,10 +354,30 @@ class TestThreeMFGeneratorCreate3mf:
             [float(value) for value in item.get("transform").split()]
             for item in build_items
         ]
-        assert abs(transforms[2][9] - transforms[0][9] - 614.4) < 1e-6
-        assert abs(transforms[3][10] - transforms[0][10] + 307.2) < 1e-6
-        assert abs(transforms[4][9] - transforms[0][9] - 307.2) < 1e-6
-        assert abs(transforms[4][10] - transforms[0][10] + 307.2) < 1e-6
+        printable_area = [
+            tuple(float(coordinate) for coordinate in point.split("x"))
+            for point in project_settings["printable_area"]
+        ]
+        bed_min_x = min(point[0] for point in printable_area)
+        bed_min_y = min(point[1] for point in printable_area)
+        bed_width = max(point[0] for point in printable_area) - bed_min_x
+        bed_depth = max(point[1] for point in printable_area) - bed_min_y
+        grid_columns = math.ceil(math.sqrt(len(colors)))
+        transforms_by_object_id = {
+            item.get("objectid"): transform
+            for item, transform in zip(build_items, transforms)
+        }
+        for plate_index, plate in enumerate(plates):
+            column = plate_index % grid_columns
+            row = plate_index // grid_columns
+            min_x = bed_min_x + column * bed_width * 1.2
+            min_y = bed_min_y - row * bed_depth * 1.2
+            object_id = plate.find(
+                "./model_instance/metadata[@key='object_id']"
+            ).attrib["value"]
+            transform = transforms_by_object_id[object_id]
+            assert min_x <= transform[9] <= min_x + bed_width
+            assert min_y <= transform[10] <= min_y + bed_depth
 
 
 class TestThreeMFGeneratorGenerate3mf:

@@ -23,7 +23,9 @@ PRINTER_PRESET = "Bambu Lab A1 0.4 nozzle"
 PROCESS_PRESET = "0.20mm PETG LEGO"
 FILAMENT_PRESET = "Generic PETG @BBL A1 - LEGO"
 BAMBU_VERSION = "02.08.02.61"
-BAMBU_PLATE_GRID_PITCH = 307.2
+BAMBU_A1_PLATE_SIZE = 256.0
+# Bambu's project grid adds this gap between bed-sized plate cells.
+BAMBU_PLATE_GRID_GAP = 0.2
 BAMBU_SETTINGS_TEMPLATE = Path(__file__).with_name("bambu_a1_petg_project_settings.json")
 
 ET.register_namespace("", NS_CORE)
@@ -457,7 +459,6 @@ class ThreeMFGenerator:
             max(0, int(placement.get("plate_index", 0)))
             for placement in placements
         })
-        # Bambu lays plate origins out in a square-ish grid at this fixed pitch.
         plate_grid_columns = math.ceil(math.sqrt(max(plate_indices, default=0) + 1))
         plates = {}
         plate_colors = {}
@@ -503,8 +504,12 @@ class ThreeMFGenerator:
             plate_column = plate_index % plate_grid_columns
             plate_row = plate_index // plate_grid_columns
             placed_center = [
-                translation[0] + center[0] + plate_column * BAMBU_PLATE_GRID_PITCH,
-                translation[1] + center[1] - plate_row * BAMBU_PLATE_GRID_PITCH,
+                translation[0] + center[0] + plate_column * (
+                    BAMBU_A1_PLATE_SIZE * (1 + BAMBU_PLATE_GRID_GAP)
+                ),
+                translation[1] + center[1] - plate_row * (
+                    BAMBU_A1_PLATE_SIZE * (1 + BAMBU_PLATE_GRID_GAP)
+                ),
                 translation[2] + center[2],
             ]
             matrix = (
