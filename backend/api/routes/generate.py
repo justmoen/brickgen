@@ -9,7 +9,10 @@ from backend.models.schemas import GenerateRequest, JobProgress, JobStatus
 from backend.api.integrations.rebrickable import RebrickableClient
 from backend.api.integrations.ldraw import LDrawManager
 from backend.core.stl_processing import STLConverter
-from backend.core.threemf_generator import ThreeMFGenerator
+from backend.core.threemf_generator import (
+    ThreeMFGenerator,
+    _group_stl_files_for_3mf,
+)
 from backend.core.job_progress import (
     add_ws_subscriber,
     get_job_progress_overlay,
@@ -271,15 +274,7 @@ async def process_generation(
             job_log.append("Generating 3MF...")
             set_job_progress(job_id, progress=80, log="\n".join(job_log))
             try:
-                unique_parts = {}
-                for stl_path, ldraw_id, color_rgb in stl_files:
-                    if stl_path not in unique_parts:
-                        unique_parts[stl_path] = {'ldraw_id': ldraw_id, 'quantity': 0, 'color_rgb': color_rgb}
-                    unique_parts[stl_path]['quantity'] += 1
-                parts_for_3mf = [
-                    (path, info['ldraw_id'], info['quantity'], info.get('color_rgb'))
-                    for path, info in unique_parts.items()
-                ]
+                parts_for_3mf = _group_stl_files_for_3mf(stl_files)
                 threemf_gen = ThreeMFGenerator(part_spacing=settings.part_spacing)
                 if not threemf_gen.generate_3mf(parts_for_3mf, plate_width, plate_depth, plate_height, threemf_path):
                     raise RuntimeError("3MF generation returned False")

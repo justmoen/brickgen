@@ -31,6 +31,21 @@ ET.register_namespace("p", NS_P)
 ET.register_namespace("BambuStudio", NS_BAMBU)
 
 
+def _group_stl_files_for_3mf(
+    stl_files: List[Tuple[Path, str, Optional[str]]],
+) -> List[Tuple[Path, str, int, Optional[str]]]:
+    grouped_parts = {}
+    for stl_path, ldraw_id, color_rgb in stl_files:
+        key = (stl_path, color_rgb)
+        if key not in grouped_parts:
+            grouped_parts[key] = {"ldraw_id": ldraw_id, "quantity": 0}
+        grouped_parts[key]["quantity"] += 1
+    return [
+        (stl_path, info["ldraw_id"], info["quantity"], color_rgb)
+        for (stl_path, color_rgb), info in grouped_parts.items()
+    ]
+
+
 class ThreeMFGenerator:
     """Generate 3MF files with parts arranged on build plate using bin packing."""
 

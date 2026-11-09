@@ -4,7 +4,10 @@ import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from backend.core.threemf_generator import ThreeMFGenerator
+from backend.core.threemf_generator import (
+    ThreeMFGenerator,
+    _group_stl_files_for_3mf,
+)
 
 
 # --- ASCII STL helpers for tests ---
@@ -124,6 +127,41 @@ class TestThreeMFGeneratorPackParts:
         placements = gen._pack_parts(part_meshes, plate_width=100, plate_depth=100, plate_height=250)
         assert placements is not None
         assert len(placements) == 2
+
+
+class TestGroupStlFilesFor3mf:
+    def test_keeps_same_part_in_different_colors(self, tmp_path):
+        stl = tmp_path / "3005.stl"
+        _write_ascii_stl(stl, [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 2]])
+        stl_files = [
+            (stl, "3005", "FF0000"),
+            (stl, "3005", "00FF00"),
+            (stl, "3005", "FF0000"),
+        ]
+
+        parts = _group_stl_files_for_3mf(stl_files)
+        assert parts == [
+            (stl, "3005", 2, "FF0000"),
+            (stl, "3005", 1, "00FF00"),
+        ]
+
+        output = tmp_path / "multi-color.3mf"
+        gen = ThreeMFGenerator()
+        assert gen.generate_3mf(parts, 100, 100, 100, output)
+        with zipfile.ZipFile(output, "r") as archive:
+            model_settings = ET.fromstring(
+                archive.read("Metadata/model_settings.config")
+            )
+            project_settings = json.loads(
+                archive.read("Metadata/project_settings.config")
+            )
+
+        assert [
+            obj.find("./metadata[@key='extruder']").attrib["value"]
+            for obj in model_settings.findall("./object")
+        ] == ["1", "1", "2"]
+        assert len(model_settings.findall("./plate")) == 2
+        assert project_settings["filament_colour"][:2] == ["#FF0000", "#00FF00"]
 
 
 class TestThreeMFGeneratorCreate3mf:
